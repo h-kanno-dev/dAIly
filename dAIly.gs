@@ -29,7 +29,7 @@ function getDisplayName(userId) {
   }
 }
 
-// 🚫 制御ワードリスト（正規表現・完全一致）
+// 制御ワードリスト（正規表現・完全一致）
 const IGNORE_REGEX = /^(カスタム|開始時刻|(\d|[０-９])+(分|時間|日)(前|後)|Yes|No|yes|no|はい|いいえ|リセット|キャンセル|やめる)$/;
 
 function doPost(e) {
@@ -61,7 +61,7 @@ function doPost(e) {
     const cacheKey = (event.message && event.message.id) || event.webhookEventId || replyToken;
     
     if (cache.get(cacheKey)) {
-      logToSheet("INFO", "♻️ キャッシュでブロックしました: " + userMessage);
+      logToSheet("INFO", "キャッシュでブロックしました: " + userMessage);
       return ContentService.createTextOutput("OK");
     }
     cache.put(cacheKey, "PROCESSED", 1800);
@@ -76,17 +76,14 @@ function doPost(e) {
     // 現在のステータス取得
     let userState = props.getProperty(`STATE_${userId}`);
 
-    // 🔄【自動リセット機能・強化版】
+    // 自動リセット機能
     if (userMessage.match(/(予定|入れて|登録|タスク)/)) {
           logToSheet("INFO", "新規コマンド検知：ステータスを強制リセットします");
           clearUserState(userId);
           userState = null; 
     }
 
-    // ============================================================
     // ステータスがある時
-    // ============================================================
-
     if (userState) {
       if (userState === 'awaiting_remind_confirm') {
         const msgLower = userMessage.toLowerCase();
@@ -115,9 +112,7 @@ function doPost(e) {
       clearUserState(userId);
     }
 
-    // ============================================================
     // ステータスがない時
-    // ============================================================
     if (IGNORE_REGEX.test(userMessage)) {
       logToSheet("INFO", "制御ワード（完全一致）のためスキップしました: " + userMessage);
       return ContentService.createTextOutput("OK");
@@ -148,7 +143,7 @@ function doPost(e) {
     }
     return ContentService.createTextOutput("OK");
   } catch (err) {
-    logToSheet("ERROR", "doPost Error: " + err.message);
+    logToSheet("ERROR", "doPostに失敗: " + err.message);
     return ContentService.createTextOutput("OK");
   } finally {
     lock.releaseLock();
@@ -162,7 +157,7 @@ function parseJst(dateStr) {
   );
 }
 
-// 📅 カレンダー登録
+// カレンダー登録
 function createEventFromAi(data, userId) {
   logToSheet("INFO", "Geminiから受け取ったデータ:", JSON.stringify(data)); 
   try {
@@ -184,7 +179,7 @@ function createEventFromAi(data, userId) {
       const timeDiff = Math.abs(event.getStartTime().getTime() - startTime.getTime());
       const isSameTitle = event.getTitle() === data.title;
       if (isSameTitle && timeDiff < 10 * 60 * 1000) {
-        logToSheet("INFO", "重複(時間差ブロック)のためスキップ: " + data.title);
+        logToSheet("INFO", "重複のためスキップ: " + data.title);
         const username = getDisplayName(userId) || "ご主人さま";
         return { success: false, message: `${username}、そのご予定はもう登録してございます✨` };
       }
@@ -229,23 +224,20 @@ function handleTimeSelection(replyToken, userId, message, username) {
     if (!sheet) { sendLineReply(replyToken, "エラー: 'ReminderQueue' シートが見つかりません💦"); return; }
 
     const eventData = JSON.parse(tempEventStr);
-    
-    if (isDuplicateEntry(sheet, userId, eventData.summary)) {
-       logToSheet("INFO", "重複書き込みをブロックしました");
-       clearUserState(userId);
-       return;
-    }
-
     const startDt = parseJst(eventData.start); 
-    // D列に書き込むための開始時刻を作成（終日の場合は「終日」、そうでない場合は「M/d HH:mm」）
     const startTimeStr = eventData.isAllDay ? "終日" : Utilities.formatDate(startDt, "JST", "M/d HH:mm");
 
     let remindDt = new Date(startDt.getTime());
     let isDouble = false; 
     let d1, d2;
 
-    if (message === '開始時刻') {
-      // そのまま
+    // 複雑なセットから順に判定
+    // includesにすることで「＆」「&」などの表記ゆれに対応
+    if (message.includes('1日前') && message.includes('3時間前')) {
+      isDouble = true;
+      d1 = new Date(startDt.getTime()); d1.setDate(d1.getDate() - 1);
+      d2 = new Date(startDt.getTime()); d2.setHours(d2.getHours() - 3);
+    } else if (message === '開始時刻') {
     } else if (message === '15分前') {
       remindDt.setMinutes(remindDt.getMinutes() - 15);
     } else if (message === '1時間前') {
@@ -254,21 +246,33 @@ function handleTimeSelection(replyToken, userId, message, username) {
       remindDt.setHours(remindDt.getHours() - 3);
     } else if (message === '1日前') {
       remindDt.setDate(remindDt.getDate() - 1);
-    } else if (message === '1日前＆3時間前') {
-      isDouble = true;
-      d1 = new Date(startDt.getTime()); d1.setDate(d1.getDate() - 1);
-      d2 = new Date(startDt.getTime()); d2.setHours(d2.getHours() - 3);
     } else {
+      logToSheet("ERROR", "想定外の選択肢が届きました" + message);
       clearUserState(userId); return;
     }
 
-    // A:リマインド日時、B:タイトル、C:ユーザーID、D:開始時刻 の順で書き込む
     if (isDouble) {
-      sheet.appendRow([Utilities.formatDate(d1, "JST", "yyyy/MM/dd HH:mm:ss"), eventData.summary, userId, startTimeStr]);
-      sheet.appendRow([Utilities.formatDate(d2, "JST", "yyyy/MM/dd HH:mm:ss"), eventData.summary, userId, startTimeStr]);
+      const d1Str = Utilities.formatDate(d1, "JST", "yyyy/MM/dd HH:mm:ss");
+      const d2Str = Utilities.formatDate(d2, "JST", "yyyy/MM/dd HH:mm:ss");
+      
+      // 重複チェック
+      if (isDuplicateEntry(sheet, userId, eventData.summary, startTimeStr, d1Str)) {
+        logToSheet("INFO", "重複ブロック（2段通知）");
+        clearUserState(userId); return;
+      }
+      
+      sheet.appendRow([d1Str, eventData.summary, userId, startTimeStr]);
+      sheet.appendRow([d2Str, eventData.summary, userId, startTimeStr]);
       sendLineReply(replyToken, `${username}、ご予定の1日前と3時間前にしっかりお知らせいたします！✨`);
     } else {
       const remindTimeStr = Utilities.formatDate(remindDt, "JST", "yyyy/MM/dd HH:mm:ss");
+      
+      // 重複チェック
+      if (isDuplicateEntry(sheet, userId, eventData.summary, startTimeStr, remindTimeStr)) {
+        logToSheet("INFO", "重複ブロック（単発通知）");
+        clearUserState(userId); return;
+      }
+
       sheet.appendRow([remindTimeStr, eventData.summary, userId, startTimeStr]);
       const confirmTime = Utilities.formatDate(remindDt, "JST", "M/d HH:mm");
       sendLineReply(replyToken, `${username}、${confirmTime}にお知らせいたします✨`);
@@ -277,7 +281,7 @@ function handleTimeSelection(replyToken, userId, message, username) {
 
   } catch (e) { 
     logToSheet("ERROR", e.message);
-    sendLineReply(replyToken, "申し訳ございません、エラーが発生しました💦\nもう一度お試しいただけますか？");
+    sendLineReply(replyToken, "申し訳ございません、エラーが発生しました💦");
   }
 }
 
@@ -298,36 +302,28 @@ function handleCustomTimeInput(replyToken, userId, message, username) {
   const prompt = `Role: Precise Time Extractor\nCurrent Time: ${nowStr}\nTask: output {"remind_at": "YYYY-MM-DDTHH:mm:ss"}\nUser Input: ${message}`;
   const payload = { "contents": [{ "parts": [{"text": prompt}] }], "generationConfig": { "responseMimeType": "application/json" } };
 
-  logToSheet("CUSTOM-DEBUG", "送信プロンプト: " + prompt);
-
   try {
-    const response = UrlFetchApp.fetch(URL, { 'method': 'post', 'contentType': 'application/json', 'payload': JSON.stringify(payload), 'muteHttpExceptions': true });
-    const responseText = response.getContentText();
-    logToSheet("CUSTOM-DEBUG", "Gemini生返答: " + responseText);
-
-    const resJson = JSON.parse(responseText);
+    const response = UrlFetchApp.fetch(URL, { 'method': 'post', 'contentType': 'application/json', 'payload': JSON.stringify(payload) });
+    const resJson = JSON.parse(response.getContentText());
     let resText = resJson.candidates[0].content.parts[0].text.replace(/```json/g, "").replace(/```/g, "").trim();
     const aiData = JSON.parse(resText);
-    if (aiData.error) throw new Error("解析不能");
+    
     const remindDt = new Date(aiData.remind_at);
-    if (isNaN(remindDt.getTime())) throw new Error("無効な日付");
+    const remindTimeStr = Utilities.formatDate(remindDt, "JST", "yyyy/MM/dd HH:mm:ss");
 
     const ss = SpreadsheetApp.openById(SHEET_ID);
     const sheet = ss.getSheetByName('ReminderQueue');
     const eventData = JSON.parse(tempEventStr);
 
-    if (isDuplicateEntry(sheet, userId, eventData.summary)) {
-       logToSheet("INFO", "重複書き込みをブロックしました(Custom)");
-       clearUserState(userId);
-       return;
-    }
-
-    // D列に書き込むための開始時刻を作成
     const startDtForSheet = parseJst(eventData.start);
     const startTimeStr = eventData.isAllDay ? "終日" : Utilities.formatDate(startDtForSheet, "JST", "M/d HH:mm");
 
-    // A:リマインド日時、B:タイトル、C:ユーザーID、D:開始時刻 の順で書き込む
-    const remindTimeStr = Utilities.formatDate(remindDt, "JST", "yyyy/MM/dd HH:mm:ss");
+    // 重複チェック
+    if (isDuplicateEntry(sheet, userId, eventData.summary, startTimeStr, remindTimeStr)) {
+      logToSheet("INFO", "重複ブロック（カスタム）");
+      clearUserState(userId); return;
+    }
+
     sheet.appendRow([remindTimeStr, eventData.summary, userId, startTimeStr]);
 
     const confirmTime = Utilities.formatDate(remindDt, "JST", "M/dのHH:mm");
@@ -335,32 +331,34 @@ function handleCustomTimeInput(replyToken, userId, message, username) {
     clearUserState(userId);
 
   } catch (e) {
-    logToSheet("ERROR", "カスタム時刻エラー詳細: " + e.message);
-    sendLineReply(replyToken, `申し訳ございません、時間の解析に失敗してしまいました💦\nもう一度簡単な言葉でお試しいただけますか？`);
+    logToSheet("ERROR", "カスタムエラー: " + e.message);
+    sendLineReply(replyToken, `申し訳ございません、時間の解析に失敗してしまいました💦`);
   }
 }
 
-// 重複チェック
-function isDuplicateEntry(sheet, userId, summary) {
+// 重複チェック用関数
+function isDuplicateEntry(sheet, userId, summary, startTimeStr, remindTimeStr) {
   try {
     const lastRow = sheet.getLastRow();
     if (lastRow < 2) return false;
-    const startRow = Math.max(2, lastRow - 5);
-    // 4列分（A〜D列）を取得するように変更
+    const startRow = Math.max(2, lastRow - 10);
     const data = sheet.getRange(startRow, 1, lastRow - startRow + 1, 4).getValues();
     
     for (let i = data.length - 1; i >= 0; i--) {
-       const rowId = data[i][2];      // C列
-       const rowSummary = data[i][1]; // B列
-       if (rowId === userId && rowSummary === summary) {
-         return true; // 重複あり
-       }
+      const rowRemind = Utilities.formatDate(new Date(data[i][0]), "JST", "yyyy/MM/dd HH:mm:ss");
+      const rowSummary = data[i][1];
+      const rowId = data[i][2];
+      const rowStart = data[i][3];
+
+      if (rowId === userId && rowSummary === summary && rowStart === startTimeStr && rowRemind === remindTimeStr) {
+        return true; 
+      }
     }
     return false;
   } catch(e) {
     return false; 
   }
-}
+} 
 
 function sendLineNotify(token, message) {
   const options = { "method": "post", "headers": {"Authorization": "Bearer " + token}, "payload": {"message": message} };
@@ -395,8 +393,6 @@ function checkAndSendReminders() {
   const sheet = SpreadsheetApp.openById(sheetId).getSheetByName('ReminderQueue');
   const data = sheet.getDataRange().getValues();
   const now = new Date();
-  
-  const token = props.getProperty('LINE_CHANNEL_ACCESS_TOKEN');
 
   for (let i = data.length - 1; i >= 1; i--) {
     const remindTimeRaw = data[i][0]; 
@@ -427,7 +423,7 @@ function checkAndSendReminders() {
         timingInfo = "事前";
         
       } else if (typeof startTimeStr === "string") {
-        // 文字列のままだった場合
+        // スプシに文字列のまま渡された場合の計算ロジック
         displayTime = startTimeStr;
         const parts = startTimeStr.split(/[\/\s:]/);
         if (parts.length >= 4) {
@@ -445,7 +441,7 @@ function checkAndSendReminders() {
         }
       }
     } catch (e) {
-      logToSheet("ERROR", "Timing calc error: " + e.message);
+      logToSheet("ERROR", "通知時刻の計算に失敗: " + e.message);
       timingInfo = "予定";
       // 万が一エラーでも時間が空欄にならないようにする
       displayTime = (startTimeStr instanceof Date) ? Utilities.formatDate(startTimeStr, "JST", "M/d HH:mm") : String(startTimeStr);
@@ -454,7 +450,7 @@ function checkAndSendReminders() {
     const aiMsg = generateAiRemindMessage(summary, displayTime, username, timingInfo);
     
     try {
-      pushLineMessage(userId, aiMsg, token); 
+      pushLineMessage(userId, aiMsg); 
       sheet.deleteRow(i + 1);
       logToSheet("INFO", `通知送信完了: ${summary}`);
     } catch (e) {
@@ -509,16 +505,17 @@ function callGeminiAPI(userMessage, username) {
     
     logToSheet("DEBUG-3", "Geminiからの生返答: " + responseText);
     
-// callGeminiAPIの最後、tryの中身を以下に差し替えてね
+    // APIレスポンスからコンテンツ部分を抽出
     const json = JSON.parse(response.getContentText());
     if (json.error || !json.candidates || !json.candidates[0].content) return null;
     let aiText = json.candidates[0].content.parts[0].text.trim();
 
     logToSheet("DEBUG-4", "パース直前のテキスト: " + aiText);
 
+    // 抽出したテキストをJSONオブジェクトとしてパース
     const data = JSON.parse(aiText);
     
-    // リスト（配列）形式の場合の処理
+    // リスト（配列）形式レスポンスに対する正規化処理
     if (Array.isArray(data)) {
       return data.map(item => ({
         "title": item.title,
@@ -531,7 +528,7 @@ function callGeminiAPI(userMessage, username) {
       }));
     }
     
-    // 単体形式の場合の処理
+    // 単一のレスポンスに対する正規化処理
     return { 
       "title": data.title, 
       "start": data.start, 
@@ -542,7 +539,7 @@ function callGeminiAPI(userMessage, username) {
       "description": data.description || "なし" 
     };
   } catch (e) {
-    logToSheet("ERROR", 'Final Parse Error:', e);
+    logToSheet("ERROR", 'JSONオブジェクトへのパース失敗:', e);
     return null;
   }
 }
@@ -570,9 +567,7 @@ function generateAiRemindMessage(summary, dateTimeStr, username, timingInfo) {
   }
 }
 
-// -------------------------------------------------------
 // スプレッドシートにログを書き出す
-// -------------------------------------------------------
 function logToSheet(type, message) {
   const sheetId = PropertiesService.getScriptProperties().getProperty('SHEET_ID');
   if (!sheetId) return; 
